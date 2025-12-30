@@ -67,7 +67,7 @@ log_environment() {
     echo "Held packages:" >> "$LOG_FILE"
     apt-mark showhold 2>&1 >> "$LOG_FILE"
     echo "APT check status:" >> "$LOG_FILE"
-    apt check 2>&1 >> "$LOG_FILE"
+    dpkg --audit 2>&1 >> "$LOG_FILE"
     echo "=== END ENVIRONMENT ===" >> "$LOG_FILE"
     echo "" >> "$LOG_FILE"
 }
@@ -135,8 +135,8 @@ preflight_system_check() {
 
     # Check broken dependencies
     print_step "Checking for broken dependencies..."
-    if ! apt check 2>&1 | grep -q "0 not fully installed or removed"; then
-        broken_deps=$(apt check 2>&1)
+    if ! dpkg --audit 2>&1 | grep -q "^$"; then
+        broken_deps=$(dpkg --audit 2>&1)
         print_warning "Found broken dependencies"
         issues_found=$((issues_found + 1))
     else
@@ -345,7 +345,7 @@ step_2_system_update() {
 
     # Verify installation
     print_step "Verifying installation..."
-    if apt check 2>&1 | grep -q "0 not fully installed or removed"; then
+    if dpkg --audit 2>&1 | grep -q "^$"; then
         print_success "System healthy after Step 2"
     else
         print_warning "System has some issues, but continuing..."
