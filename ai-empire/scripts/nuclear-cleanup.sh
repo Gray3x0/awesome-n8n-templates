@@ -178,17 +178,52 @@ done
 print_success "All Docker Compose stacks checked"
 
 ################################################################################
-# STEP 5: Remove ALL Ollama binaries from everywhere
+# STEP 5: Remove package manager installations FIRST
 ################################################################################
-print_header "Step 5: Removing ALL Ollama Binaries"
+print_header "Step 5: Removing Package Manager Installations"
 
-# Common binary locations
+# Snap (must be removed before trying to delete read-only files)
+if command -v snap &> /dev/null; then
+    if snap list 2>/dev/null | grep -q ollama; then
+        print_warning "Found Snap package, removing..."
+        snap remove ollama --purge 2>/dev/null || true
+        FOUND_COUNT=$((FOUND_COUNT + 1))
+        sleep 2
+    fi
+fi
+
+# Flatpak
+if command -v flatpak &> /dev/null; then
+    if flatpak list 2>/dev/null | grep -qi ollama; then
+        print_warning "Found Flatpak package, removing..."
+        flatpak uninstall -y ollama 2>/dev/null || true
+        FOUND_COUNT=$((FOUND_COUNT + 1))
+    fi
+fi
+
+# APT
+if command -v apt &> /dev/null; then
+    if dpkg -l | grep -qi ollama; then
+        print_warning "Found APT package, removing..."
+        apt remove --purge -y ollama 2>/dev/null || true
+        apt autoremove -y 2>/dev/null || true
+        FOUND_COUNT=$((FOUND_COUNT + 1))
+    fi
+fi
+
+print_success "Package managers checked"
+
+################################################################################
+# STEP 6: Remove ALL Ollama binaries from everywhere
+################################################################################
+print_header "Step 6: Removing ALL Ollama Binaries"
+
+# Common binary locations (snap/bin will be gone after snap removal)
 BINARY_PATHS=(
     "/usr/local/bin/ollama"
     "/usr/bin/ollama"
     "/bin/ollama"
     "/opt/ollama"
-    "/snap/bin/ollama"
     "$HOME/.local/bin/ollama"
 )
 
@@ -208,22 +243,26 @@ find /home -name "ollama" -type f -executable 2>/dev/null | while read -r binary
 done
 
 # Search entire filesystem (can be slow but thorough)
+# Skip read-only filesystems like /snap
 print_info "Performing deep filesystem scan for ollama binaries..."
-find / -name "ollama" -type f -executable 2>/dev/null | while read -r binary; do
-    # Skip if it's in our ai-empire directory
-    if [[ ! "$binary" =~ "ai-empire" ]] && [[ ! "$binary" =~ "awesome-n8n" ]]; then
-        print_warning "Found binary: $binary"
-        rm -f "$binary"
-        FOUND_COUNT=$((FOUND_COUNT + 1))
-    fi
+find / -name "ollama" -type f -executable \
+    -not -path "/snap/*" \
+    -not -path "/proc/*" \
+    -not -path "/sys/*" \
+    -not -path "*/ai-empire/*" \
+    -not -path "*/awesome-n8n/*" \
+    2>/dev/null | while read -r binary; do
+    print_warning "Found binary: $binary"
+    rm -f "$binary" 2>/dev/null || print_warning "Could not remove $binary (read-only?)"
+    FOUND_COUNT=$((FOUND_COUNT + 1))
 done
 
 print_success "All binaries removed"
 
 ################################################################################
-# STEP 6: Remove ALL Ollama data directories
+# STEP 7: Remove ALL Ollama data directories
 ################################################################################
-print_header "Step 6: Removing ALL Data Directories"
+print_header "Step 7: Removing ALL Data Directories"
 
 # Standard data locations
 DATA_DIRS=(
@@ -266,9 +305,9 @@ done
 print_success "All data directories removed"
 
 ################################################################################
-# STEP 7: Remove ALL configuration files
+# STEP 8: Remove ALL configuration files
 ################################################################################
-print_header "Step 7: Removing ALL Configuration Files"
+print_header "Step 8: Removing ALL Configuration Files"
 
 # Config locations
 find /etc -name "*ollama*" 2>/dev/null | while read -r config; do
@@ -285,40 +324,6 @@ find /home -name "*ollama*" -path "*/.*" 2>/dev/null | while read -r config; do
 done
 
 print_success "All configuration files removed"
-
-################################################################################
-# STEP 8: Remove package manager installations
-################################################################################
-print_header "Step 8: Removing Package Manager Installations"
-
-# Snap
-if command -v snap &> /dev/null; then
-    if snap list 2>/dev/null | grep -q ollama; then
-        print_warning "Found Snap package"
-        snap remove ollama --purge 2>/dev/null || true
-        FOUND_COUNT=$((FOUND_COUNT + 1))
-    fi
-fi
-
-# Flatpak
-if command -v flatpak &> /dev/null; then
-    if flatpak list 2>/dev/null | grep -qi ollama; then
-        print_warning "Found Flatpak package"
-        flatpak uninstall -y ollama 2>/dev/null || true
-        FOUND_COUNT=$((FOUND_COUNT + 1))
-    fi
-fi
-
-# APT
-if command -v apt &> /dev/null; then
-    if dpkg -l | grep -qi ollama; then
-        print_warning "Found APT package"
-        apt remove --purge -y ollama 2>/dev/null || true
-        FOUND_COUNT=$((FOUND_COUNT + 1))
-    fi
-fi
-
-print_success "Package managers checked"
 
 ################################################################################
 # STEP 9: Remove environment variables and shell configs
