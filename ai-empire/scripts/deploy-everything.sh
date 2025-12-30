@@ -145,8 +145,10 @@ preflight_system_check() {
 
     # Check for Brave Browser repo issue
     print_step "Checking for problematic repositories..."
-    if [ -f /etc/apt/sources.list.d/brave-browser-apt-nightly.list ]; then
-        print_warning "Found Brave Browser nightly repo (known GPG issue)"
+    if [ -f /etc/apt/sources.list.d/brave-browser-apt-nightly.list ] || \
+       [ -f /etc/apt/sources.list.d/brave-browser-release.list ] || \
+       ls /etc/apt/sources.list.d/brave* 2>/dev/null | grep -q .; then
+        print_warning "Found Brave Browser repo (known GPG issue)"
         gpg_errors="brave-browser"
         issues_found=$((issues_found + 1))
     fi
@@ -207,10 +209,11 @@ fix_system_issues() {
     # Remove Brave Browser repo if exists
     if [ -n "$gpg" ]; then
         print_step "Removing Brave Browser repository..."
-        rm -f /etc/apt/sources.list.d/brave-browser-apt-nightly.list
-        rm -f /etc/apt/sources.list.d/brave-browser-release.list
-        # Remove GPG key
-        apt-key del 2>/dev/null $(apt-key list | grep -B 1 "brave" | head -1 | awk '{print $2}' | tr -d '/') 2>/dev/null || true
+        rm -f /etc/apt/sources.list.d/brave*
+        # Remove GPG keys (both old apt-key and new method)
+        apt-key del C3DE1DD4F661CDCB 2>/dev/null || true
+        rm -f /usr/share/keyrings/brave*
+        rm -f /etc/apt/trusted.gpg.d/brave*
         print_success "Brave repository removed"
     fi
 
@@ -332,16 +335,28 @@ step_2_system_update() {
     apt-get clean
     apt-get autoclean
 
+    # Check if containerd.io exists (Docker Desktop or manual install)
+    local docker_pkg="docker.io"
+    if dpkg -l | grep -q containerd.io; then
+        print_warning "containerd.io detected - using Docker CE instead of docker.io"
+        docker_pkg=""  # Don't install docker.io, containerd.io provides it
+    fi
+
     # Install system dependencies with retry
     print_step "Installing system dependencies..."
-    install_packages_with_retry "curl wget git build-essential \
-        docker.io \
+    local packages="curl wget git build-essential \
         python3 python3-pip python3-venv \
         postgresql-client redis-tools \
         nginx certbot python3-certbot-nginx \
         jq net-tools lsof htop \
         software-properties-common \
-        ca-certificates gnupg" || handle_error "System dependencies installation failed"
+        ca-certificates gnupg"
+
+    if [ -n "$docker_pkg" ]; then
+        packages="$packages $docker_pkg"
+    fi
+
+    install_packages_with_retry "$packages" || handle_error "System dependencies installation failed"
 
     # Verify installation
     print_step "Verifying installation..."
@@ -358,7 +373,8 @@ step_3_python_packages() {
     print_header "STEP 3/15: Python Packages"
     print_step "Installing Python packages..."
 
-    pip3 install --upgrade pip --break-system-packages -q
+    # Don't upgrade pip on Debian/Ubuntu (it's managed by apt)
+    # Just install packages directly
     pip3 install --break-system-packages -q \
         requests \
         psycopg2-binary \
