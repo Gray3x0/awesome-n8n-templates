@@ -374,8 +374,8 @@ step_3_python_packages() {
     print_step "Installing Python packages..."
 
     # Don't upgrade pip on Debian/Ubuntu (it's managed by apt)
-    # Just install packages directly
-    pip3 install --break-system-packages -q \
+    # Use --ignore-installed to avoid conflicts with Debian-managed packages (blinker, etc)
+    pip3 install --break-system-packages --ignore-installed -q \
         requests \
         psycopg2-binary \
         flask \
