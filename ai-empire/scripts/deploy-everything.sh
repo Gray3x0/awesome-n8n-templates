@@ -30,6 +30,17 @@ print_step() { echo -e "${CYAN}[→]${NC} $1"; }
 SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
 AI_EMPIRE_DIR="$( cd "$SCRIPT_DIR/.." && pwd )"
 LOG_FILE="/var/log/ai-empire-deployment.log"
+SKIP_CLEANUP=false
+
+# Parse command line arguments
+for arg in "$@"; do
+    case $arg in
+        --skip-cleanup)
+            SKIP_CLEANUP=true
+            shift
+            ;;
+    esac
+done
 
 # Redirect all output to log file as well as stdout
 exec > >(tee -a "$LOG_FILE")
@@ -46,6 +57,19 @@ handle_error() {
     print_error "Deployment failed at: $1"
     print_info "Check log file: $LOG_FILE"
     exit 1
+}
+
+log_environment() {
+    echo "" >> "$LOG_FILE"
+    echo "=== DEPLOYMENT ENVIRONMENT $(date) ===" >> "$LOG_FILE"
+    lsb_release -a 2>&1 >> "$LOG_FILE"
+    echo "APT version: $(apt-get --version | head -1)" >> "$LOG_FILE"
+    echo "Held packages:" >> "$LOG_FILE"
+    apt-mark showhold 2>&1 >> "$LOG_FILE"
+    echo "APT check status:" >> "$LOG_FILE"
+    apt check 2>&1 >> "$LOG_FILE"
+    echo "=== END ENVIRONMENT ===" >> "$LOG_FILE"
+    echo "" >> "$LOG_FILE"
 }
 
 confirm_deployment() {
@@ -87,10 +111,171 @@ EOF
 }
 
 ################################################################################
+# PRE-FLIGHT SYSTEM CHECK
+################################################################################
+
+preflight_system_check() {
+    print_header "PRE-FLIGHT: System Health Check"
+
+    local issues_found=0
+    local held_packages=""
+    local broken_deps=""
+    local gpg_errors=""
+
+    # Check held packages
+    print_step "Checking for held packages..."
+    held_packages=$(apt-mark showhold)
+    if [ -n "$held_packages" ]; then
+        print_warning "Found held packages:"
+        echo "$held_packages" | sed 's/^/  - /'
+        issues_found=$((issues_found + 1))
+    else
+        print_success "No held packages"
+    fi
+
+    # Check broken dependencies
+    print_step "Checking for broken dependencies..."
+    if ! apt check 2>&1 | grep -q "0 not fully installed or removed"; then
+        broken_deps=$(apt check 2>&1)
+        print_warning "Found broken dependencies"
+        issues_found=$((issues_found + 1))
+    else
+        print_success "No broken dependencies"
+    fi
+
+    # Check for Brave Browser repo issue
+    print_step "Checking for problematic repositories..."
+    if [ -f /etc/apt/sources.list.d/brave-browser-apt-nightly.list ]; then
+        print_warning "Found Brave Browser nightly repo (known GPG issue)"
+        gpg_errors="brave-browser"
+        issues_found=$((issues_found + 1))
+    fi
+
+    # Report findings
+    if [ $issues_found -gt 0 ]; then
+        echo ""
+        print_warning "Found $issues_found issue(s) that may cause deployment failure"
+        echo ""
+        echo "┌─ Interactive Resolution Options ─────────────────────┐"
+        echo "│  1. Auto-fix all issues (recommended)               │"
+        echo "│  2. Fix only held packages                          │"
+        echo "│  3. Continue anyway (risky)                         │"
+        echo "│  4. Exit and review manually                        │"
+        echo "└──────────────────────────────────────────────────────┘"
+        echo ""
+
+        read -p "Choose option [1-4]: " -r choice
+
+        case $choice in
+            1)
+                print_info "Auto-fixing all issues..."
+                fix_system_issues "$held_packages" "$broken_deps" "$gpg_errors"
+                ;;
+            2)
+                print_info "Fixing held packages only..."
+                fix_held_packages "$held_packages"
+                ;;
+            3)
+                print_warning "Continuing with existing issues - deployment may fail!"
+                sleep 2
+                ;;
+            4)
+                print_info "Exiting for manual review"
+                echo ""
+                echo "Manual fix commands:"
+                echo "  apt-mark showhold          # List held packages"
+                echo "  apt-mark unhold <package>  # Unhold a package"
+                echo "  apt --fix-broken install   # Fix broken dependencies"
+                echo ""
+                exit 0
+                ;;
+            *)
+                print_error "Invalid choice"
+                exit 1
+                ;;
+        esac
+    else
+        print_success "System is healthy - ready for deployment!"
+    fi
+}
+
+fix_system_issues() {
+    local held="$1"
+    local broken="$2"
+    local gpg="$3"
+
+    # Remove Brave Browser repo if exists
+    if [ -n "$gpg" ]; then
+        print_step "Removing Brave Browser repository..."
+        rm -f /etc/apt/sources.list.d/brave-browser-apt-nightly.list
+        rm -f /etc/apt/sources.list.d/brave-browser-release.list
+        # Remove GPG key
+        apt-key del 2>/dev/null $(apt-key list | grep -B 1 "brave" | head -1 | awk '{print $2}' | tr -d '/') 2>/dev/null || true
+        print_success "Brave repository removed"
+    fi
+
+    # Fix broken dependencies
+    if [ -n "$broken" ]; then
+        print_step "Fixing broken dependencies..."
+        apt-get --fix-broken install -y
+        apt-get --fix-missing -y
+        print_success "Dependencies fixed"
+    fi
+
+    # Unhold packages (safe ones)
+    if [ -n "$held" ]; then
+        print_step "Analyzing held packages..."
+        echo "$held" | while read -r pkg; do
+            # Safe to unhold: docker, podman, dev packages
+            if [[ "$pkg" =~ (docker|podman|python|build-essential) ]]; then
+                print_info "Unholding safe package: $pkg"
+                apt-mark unhold "$pkg"
+            # Keep held: CUDA, kernel packages
+            elif [[ "$pkg" =~ (cuda|cudnn|linux-image|linux-headers) ]]; then
+                print_warning "Keeping held (system critical): $pkg"
+            else
+                print_warning "Keeping held (manual review needed): $pkg"
+            fi
+        done
+    fi
+
+    # Clean and update
+    print_step "Cleaning APT cache..."
+    apt-get clean
+    apt-get autoclean
+    apt-get autoremove -y
+
+    print_step "Updating package lists..."
+    apt-get update
+
+    print_success "All issues fixed!"
+}
+
+fix_held_packages() {
+    local held="$1"
+
+    if [ -n "$held" ]; then
+        echo "$held" | while read -r pkg; do
+            if [[ "$pkg" =~ (docker|podman|python|build-essential) ]]; then
+                print_info "Unholding: $pkg"
+                apt-mark unhold "$pkg"
+            fi
+        done
+        print_success "Held packages fixed"
+    fi
+}
+
+################################################################################
 # DEPLOYMENT STEPS
 ################################################################################
 
 step_1_nuclear_cleanup() {
+    if [ "$SKIP_CLEANUP" = true ]; then
+        print_header "STEP 1/15: Nuclear Cleanup (SKIPPED)"
+        print_warning "Cleanup skipped via --skip-cleanup flag"
+        return
+    fi
+
     print_header "STEP 1/15: Nuclear Cleanup of Existing Ollama"
     print_step "Running comprehensive cleanup across entire server..."
 
@@ -107,21 +292,64 @@ step_1_nuclear_cleanup() {
 
 step_2_system_update() {
     print_header "STEP 2/15: System Update and Dependencies"
+
+    # Function to install packages with retry logic
+    install_packages_with_retry() {
+        local packages="$1"
+        local attempt=1
+        local max_attempts=3
+
+        while [ $attempt -le $max_attempts ]; do
+            print_step "Installation attempt $attempt/$max_attempts..."
+
+            if apt-get install -y $packages 2>&1 | tee -a "$LOG_FILE"; then
+                print_success "Packages installed successfully"
+                return 0
+            else
+                print_warning "Installation failed on attempt $attempt"
+
+                if [ $attempt -lt $max_attempts ]; then
+                    print_step "Fixing dependencies before retry..."
+                    apt-get --fix-broken install -y 2>&1 >> "$LOG_FILE"
+                    apt-get clean
+                    apt-get update
+                    attempt=$((attempt + 1))
+                    sleep 2
+                else
+                    print_error "Failed after $max_attempts attempts"
+                    return 1
+                fi
+            fi
+        done
+    }
+
+    # Update package lists
     print_step "Updating package lists..."
+    apt-get update || handle_error "apt update failed"
 
-    apt-get update -qq || handle_error "apt update failed"
+    # Pre-installation cleanup
+    print_step "Cleaning APT cache..."
+    apt-get clean
+    apt-get autoclean
 
+    # Install system dependencies with retry
     print_step "Installing system dependencies..."
-    apt-get install -y -qq \
-        curl wget git build-essential \
+    install_packages_with_retry "curl wget git build-essential \
         docker.io docker-compose \
         python3 python3-pip python3-venv \
         postgresql-client redis-tools \
         nginx certbot python3-certbot-nginx \
         jq net-tools lsof htop \
         software-properties-common \
-        ca-certificates gnupg \
-        || handle_error "System dependencies installation failed"
+        ca-certificates gnupg" || handle_error "System dependencies installation failed"
+
+    # Verify installation
+    print_step "Verifying installation..."
+    if apt check 2>&1 | grep -q "0 not fully installed or removed"; then
+        print_success "System healthy after Step 2"
+    else
+        print_warning "System has some issues, but continuing..."
+    fi
 
     print_success "System dependencies installed"
 }
@@ -615,8 +843,14 @@ main() {
     echo "Deployment started: $(date)" >> "$LOG_FILE"
 
     check_root
+    log_environment
+
     confirm_deployment
 
+    # Run pre-flight checks
+    preflight_system_check
+
+    # Main deployment steps
     step_1_nuclear_cleanup
     step_2_system_update
     step_3_python_packages
@@ -636,6 +870,7 @@ main() {
     print_deployment_summary
 
     echo "Deployment completed: $(date)" >> "$LOG_FILE"
+    echo "" >> "$LOG_FILE"
 }
 
 main "$@"
