@@ -335,7 +335,7 @@ step_2_system_update() {
     # Install system dependencies with retry
     print_step "Installing system dependencies..."
     install_packages_with_retry "curl wget git build-essential \
-        docker.io docker-compose \
+        docker.io \
         python3 python3-pip python3-venv \
         postgresql-client redis-tools \
         nginx certbot python3-certbot-nginx \
@@ -358,8 +358,8 @@ step_3_python_packages() {
     print_header "STEP 3/15: Python Packages"
     print_step "Installing Python packages..."
 
-    pip3 install --upgrade pip -q
-    pip3 install -q \
+    pip3 install --upgrade pip --break-system-packages -q
+    pip3 install --break-system-packages -q \
         requests \
         psycopg2-binary \
         flask \
@@ -372,6 +372,12 @@ step_3_python_packages() {
 step_4_docker_setup() {
     print_header "STEP 4/15: Docker Configuration"
     print_step "Configuring Docker..."
+
+    # Install docker-compose via pip if not available
+    if ! command -v docker-compose &> /dev/null; then
+        print_step "Installing docker-compose via pip..."
+        pip3 install --break-system-packages docker-compose
+    fi
 
     systemctl enable docker
     systemctl start docker
