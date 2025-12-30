@@ -1,0 +1,192 @@
+{
+  "name": "VRAM-Aware Intelligent Routing",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "smart-inference",
+        "responseMode": "responseNode",
+        "options": {}
+      },
+      "name": "Webhook",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 1,
+      "position": [250, 300]
+    },
+    {
+      "parameters": {
+        "url": "http://localhost:8080/vram",
+        "method": "GET",
+        "options": {}
+      },
+      "name": "Check VRAM Status",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 3,
+      "position": [450, 300]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "boolean": [
+            {
+              "value1": "={{ $json.available_for_inference }}",
+              "value2": true
+            }
+          ]
+        }
+      },
+      "name": "Is VRAM Available?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 1,
+      "position": [650, 300]
+    },
+    {
+      "parameters": {
+        "url": "http://localhost:8080/execute",
+        "method": "POST",
+        "jsonParameters": true,
+        "bodyParametersJson": "={\n  \"pattern\": \"{{ $node['Webhook'].json.pattern }}\",\n  \"input\": \"{{ $node['Webhook'].json.input }}\",\n  \"force_model\": \"local\"\n}"
+      },
+      "name": "Use Local DeepSeek (FREE)",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 3,
+      "position": [850, 200]
+    },
+    {
+      "parameters": {
+        "url": "http://localhost:8080/execute",
+        "method": "POST",
+        "jsonParameters": true,
+        "bodyParametersJson": "={\n  \"pattern\": \"{{ $node['Webhook'].json.pattern }}\",\n  \"input\": \"{{ $node['Webhook'].json.input }}\",\n  \"force_model\": \"cloud\"\n}"
+      },
+      "name": "Use Claude API (PAID)",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 3,
+      "position": [850, 400]
+    },
+    {
+      "parameters": {},
+      "name": "Merge Results",
+      "type": "n8n-nodes-base.merge",
+      "typeVersion": 2,
+      "position": [1050, 300]
+    },
+    {
+      "parameters": {
+        "operation": "insert",
+        "schema": "public",
+        "table": "inference_logs",
+        "columns": "pattern, model_used, cost, response_time_ms, vram_available, created_at",
+        "options": {}
+      },
+      "name": "Log to Database",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2,
+      "position": [1250, 300],
+      "credentials": {
+        "postgres": {
+          "id": "1",
+          "name": "AI Empire PostgreSQL"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ $json }}"
+      },
+      "name": "Respond to Webhook",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1,
+      "position": [1450, 300]
+    }
+  ],
+  "connections": {
+    "Webhook": {
+      "main": [
+        [
+          {
+            "node": "Check VRAM Status",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Check VRAM Status": {
+      "main": [
+        [
+          {
+            "node": "Is VRAM Available?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Is VRAM Available?": {
+      "main": [
+        [
+          {
+            "node": "Use Local DeepSeek (FREE)",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Use Claude API (PAID)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Use Local DeepSeek (FREE)": {
+      "main": [
+        [
+          {
+            "node": "Merge Results",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Use Claude API (PAID)": {
+      "main": [
+        [
+          {
+            "node": "Merge Results",
+            "type": "main",
+            "index": 1
+          }
+        ]
+      ]
+    },
+    "Merge Results": {
+      "main": [
+        [
+          {
+            "node": "Log to Database",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Log to Database": {
+      "main": [
+        [
+          {
+            "node": "Respond to Webhook",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {},
+  "tags": []
+}
