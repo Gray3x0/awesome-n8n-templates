@@ -457,7 +457,7 @@ step_5_nvidia_docker() {
             return 1
         }
 
-        apt-get install -y -qq nvidia-container-toolkit || {
+        apt-get install -y --allow-downgrades -qq nvidia-container-toolkit || {
             print_warning "NVIDIA Container Toolkit installation failed (not critical)"
             return 1
         }
