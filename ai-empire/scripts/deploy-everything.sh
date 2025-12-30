@@ -296,6 +296,12 @@ step_1_nuclear_cleanup() {
 step_2_system_update() {
     print_header "STEP 2/15: System Update and Dependencies"
 
+    # CRITICAL: Clean corrupted NVIDIA sources before apt update
+    print_step "Cleaning corrupted APT sources (if any)..."
+    rm -f /etc/apt/sources.list.d/nvidia-container-toolkit.list
+    rm -f /etc/apt/sources.list.d/cuda-ubuntu2404-x86_64.sources 2>/dev/null || true
+    rm -f /usr/share/keyrings/nvidia-container-toolkit-keyring.gpg 2>/dev/null || true
+
     # Function to install packages with retry logic
     install_packages_with_retry() {
         local packages="$1"
@@ -326,14 +332,14 @@ step_2_system_update() {
         done
     }
 
-    # Update package lists
-    print_step "Updating package lists..."
-    apt-get update || handle_error "apt update failed"
-
-    # Pre-installation cleanup
+    # Clean APT cache before update
     print_step "Cleaning APT cache..."
     apt-get clean
     apt-get autoclean
+
+    # Update package lists
+    print_step "Updating package lists..."
+    apt-get update || handle_error "apt update failed"
 
     # Check if containerd.io exists (Docker Desktop or manual install)
     local docker_pkg="docker.io"
@@ -412,22 +418,61 @@ step_5_nvidia_docker() {
     if command -v nvidia-smi &> /dev/null; then
         print_step "Installing NVIDIA Docker runtime..."
 
-        # Add NVIDIA Docker repository (using new stable/deb repository structure)
-        curl -fsSL https://nvidia.github.io/libnvidia-container/gpgkey | gpg --dearmor -o /usr/share/keyrings/nvidia-container-toolkit-keyring.gpg
-        curl -s -L https://nvidia.github.io/libnvidia-container/stable/deb/nvidia-container-toolkit.list | \
-            sed 's#deb https://#deb [signed-by=/usr/share/keyrings/nvidia-container-toolkit-keyring.gpg] https://#g' | \
-            tee /etc/apt/sources.list.d/nvidia-container-toolkit.list
+        # Download GPG key
+        curl -fsSL https://nvidia.github.io/libnvidia-container/gpgkey | \
+            gpg --dearmor -o /usr/share/keyrings/nvidia-container-toolkit-keyring.gpg || {
+            print_warning "Failed to download NVIDIA GPG key"
+            return 1
+        }
 
-        apt-get update -qq
-        apt-get install -y -qq nvidia-container-toolkit || print_warning "NVIDIA Docker runtime installation failed (not critical)"
+        # Download repository list to temp file for validation
+        print_step "Downloading NVIDIA repository list..."
+        curl -fsSL https://nvidia.github.io/libnvidia-container/stable/deb/nvidia-container-toolkit.list \
+            -o /tmp/nvidia-container-toolkit.list || {
+            print_warning "Failed to download NVIDIA repository list"
+            return 1
+        }
+
+        # Validate file is not HTML (404 error page)
+        if head -1 /tmp/nvidia-container-toolkit.list | grep -qi "<!doctype\|<html"; then
+            print_error "Downloaded file is HTML (404), not a valid repository list"
+            print_warning "NVIDIA Container Toolkit repository may not support Ubuntu 24.04 Noble yet"
+            print_warning "Skipping NVIDIA Docker installation, continuing with CPU-only setup"
+            rm -f /tmp/nvidia-container-toolkit.list
+            return 1
+        fi
+
+        # File is valid, add signed-by directive and install
+        print_step "Installing NVIDIA Container Toolkit..."
+        sed 's#deb https://#deb [signed-by=/usr/share/keyrings/nvidia-container-toolkit-keyring.gpg] https://#g' \
+            /tmp/nvidia-container-toolkit.list | \
+            tee /etc/apt/sources.list.d/nvidia-container-toolkit.list > /dev/null
+
+        rm -f /tmp/nvidia-container-toolkit.list
+
+        # Update and install
+        apt-get update -qq || {
+            print_warning "apt update failed after adding NVIDIA repository"
+            rm -f /etc/apt/sources.list.d/nvidia-container-toolkit.list
+            return 1
+        }
+
+        apt-get install -y -qq nvidia-container-toolkit || {
+            print_warning "NVIDIA Container Toolkit installation failed (not critical)"
+            return 1
+        }
 
         # Configure Docker to use NVIDIA runtime
-        nvidia-ctk runtime configure --runtime=docker || true
-        systemctl restart docker
-
-        print_success "NVIDIA Docker runtime configured"
+        if command -v nvidia-ctk &> /dev/null; then
+            nvidia-ctk runtime configure --runtime=docker || print_warning "nvidia-ctk configure failed"
+            systemctl restart docker
+            print_success "NVIDIA Docker runtime configured"
+        else
+            print_warning "nvidia-ctk not found after installation"
+        fi
     else
-        print_warning "NVIDIA GPU not detected, skipping NVIDIA Docker runtime"
+        print_warning "NVIDIA GPU not detected (nvidia-smi not available), skipping NVIDIA Docker runtime"
+        print_info "If you have an NVIDIA GPU, install the driver first and re-run this script"
     fi
 }
 
