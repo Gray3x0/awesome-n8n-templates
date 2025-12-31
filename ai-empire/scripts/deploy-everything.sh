@@ -274,12 +274,12 @@ fix_held_packages() {
 
 step_1_nuclear_cleanup() {
     if [ "$SKIP_CLEANUP" = true ]; then
-        print_header "STEP 1/15: Nuclear Cleanup (SKIPPED)"
+        print_header "STEP 1/16: Nuclear Cleanup (SKIPPED)"
         print_warning "Cleanup skipped via --skip-cleanup flag"
         return
     fi
 
-    print_header "STEP 1/15: Nuclear Cleanup of Existing Ollama"
+    print_header "STEP 1/16: Nuclear Cleanup of Existing Ollama"
     print_step "Running comprehensive cleanup across entire server..."
 
     if [ -f "$SCRIPT_DIR/nuclear-cleanup.sh" ]; then
@@ -294,7 +294,7 @@ step_1_nuclear_cleanup() {
 }
 
 step_2_system_update() {
-    print_header "STEP 2/15: System Update and Dependencies"
+    print_header "STEP 2/16: System Update and Dependencies"
 
     # CRITICAL: Clean corrupted NVIDIA sources before apt update
     print_step "Cleaning corrupted APT sources (if any)..."
@@ -376,7 +376,7 @@ step_2_system_update() {
 }
 
 step_3_python_packages() {
-    print_header "STEP 3/15: Python Packages"
+    print_header "STEP 3/16: Python Packages"
     print_step "Installing Python packages..."
 
     # Don't upgrade pip on Debian/Ubuntu (it's managed by apt)
@@ -392,7 +392,7 @@ step_3_python_packages() {
 }
 
 step_4_docker_setup() {
-    print_header "STEP 4/15: Docker Configuration"
+    print_header "STEP 4/16: Docker Configuration"
     print_step "Configuring Docker..."
 
     # Install docker-compose via pip if not available
@@ -412,8 +412,51 @@ step_4_docker_setup() {
     print_success "Docker configured"
 }
 
+step_4b_nvidia_driver() {
+    print_header "STEP 4b/16: NVIDIA Driver 570 Installation"
+
+    # Check if NVIDIA driver is already installed
+    if command -v nvidia-smi &> /dev/null; then
+        local current_version=$(nvidia-smi --query-gpu=driver_version --format=csv,noheader 2>/dev/null | head -1)
+        print_info "NVIDIA driver already installed: $current_version"
+
+        # Check if version is 570+
+        if [[ "$current_version" == 570* ]] || [[ "$current_version" > "570" ]]; then
+            print_success "Driver version $current_version is compatible"
+            return 0
+        else
+            print_warning "Driver version $current_version is older than 570"
+            print_info "Upgrading to driver 570..."
+        fi
+    fi
+
+    print_step "Adding NVIDIA PPA for Ubuntu 24.04..."
+    add-apt-repository -y ppa:graphics-drivers/ppa 2>/dev/null || true
+    apt-get update -qq
+
+    print_step "Installing NVIDIA driver 570..."
+    apt-get install -y --allow-downgrades nvidia-driver-570 || {
+        print_warning "nvidia-driver-570 not available, trying nvidia-driver-550..."
+        apt-get install -y --allow-downgrades nvidia-driver-550 || {
+            print_error "NVIDIA driver installation failed"
+            print_warning "You may need to install manually: sudo ubuntu-drivers install"
+            return 1
+        }
+    }
+
+    print_success "NVIDIA driver installed"
+    print_warning "A REBOOT may be required for driver changes to take effect"
+
+    # Verify installation
+    if command -v nvidia-smi &> /dev/null; then
+        print_step "Verifying NVIDIA driver..."
+        nvidia-smi --query-gpu=name,driver_version,memory.total --format=csv
+        print_success "NVIDIA driver verified"
+    fi
+}
+
 step_5_nvidia_docker() {
-    print_header "STEP 5/15: NVIDIA Docker Runtime"
+    print_header "STEP 5/16: NVIDIA Docker Runtime"
 
     if command -v nvidia-smi &> /dev/null; then
         print_step "Installing NVIDIA Docker runtime..."
@@ -477,7 +520,7 @@ step_5_nvidia_docker() {
 }
 
 step_6_ollama_install() {
-    print_header "STEP 6/15: Fresh Ollama Installation"
+    print_header "STEP 6/16: Fresh Ollama Installation"
     print_step "Installing Ollama..."
 
     curl -fsSL https://ollama.com/install.sh | sh || handle_error "Ollama installation failed"
@@ -487,41 +530,82 @@ step_6_ollama_install() {
 }
 
 step_7_ollama_optimize() {
-    print_header "STEP 7/15: GTX 1060 Optimizations"
+    print_header "STEP 7/16: GTX 1060 6GB Optimizations"
     print_step "Configuring Ollama for GTX 1060 6GB..."
+
+    # Create RAID models directory for faster I/O
+    mkdir -p /raid/ollama
+    chown -R root:root /raid/ollama 2>/dev/null || true
 
     mkdir -p /etc/systemd/system/ollama.service.d
 
+    # GTX 1060 6GB optimized configuration
+    # VRAM: 5.5GB in bytes = 5905580032 (leaving 500MB headroom)
+    # KV Cache: q4_0 for memory efficiency on Pascal architecture
     cat > /etc/systemd/system/ollama.service.d/override.conf << 'EOF'
 [Service]
+# Network binding - allow remote access
 Environment="OLLAMA_HOST=0.0.0.0:11434"
-Environment="OLLAMA_KV_CACHE_TYPE=q8_0"
+
+# Model storage on RAID for performance
+Environment="OLLAMA_MODELS=/raid/ollama"
+
+# GTX 1060 6GB Memory Optimizations
+# 5.5GB VRAM limit in bytes (6GB - 500MB headroom)
+Environment="OLLAMA_MAX_VRAM=5905580032"
+
+# q4_0 KV cache for Pascal architecture (GTX 10xx)
+# Reduces VRAM usage by ~50% vs f16, minimal quality loss
+Environment="OLLAMA_KV_CACHE_TYPE=q4_0"
+
+# Flash Attention for memory efficiency
 Environment="OLLAMA_FLASH_ATTENTION=1"
+
+# Single request processing (VRAM constraint)
 Environment="OLLAMA_NUM_PARALLEL=1"
+
+# Keep only one model loaded (VRAM constraint)
 Environment="OLLAMA_MAX_LOADED_MODELS=1"
+
+# GPU selection
 Environment="CUDA_VISIBLE_DEVICES=0"
-Environment="OLLAMA_MAX_VRAM=5.5GB"
+
+# Keep model loaded for 24 hours (avoid reload latency)
 Environment="OLLAMA_KEEP_ALIVE=24h"
+
+# Debug logging (comment out for production)
+# Environment="OLLAMA_DEBUG=1"
 EOF
 
     systemctl daemon-reload
     systemctl enable ollama
     systemctl restart ollama
 
-    # Wait for Ollama to start
+    # Wait for Ollama to start with retry
     print_step "Waiting for Ollama to start..."
-    sleep 5
+    local max_attempts=12
+    local attempt=1
+    while [ $attempt -le $max_attempts ]; do
+        if curl -s http://localhost:11434/api/tags > /dev/null 2>&1; then
+            print_success "Ollama is running with GTX 1060 optimizations"
+            print_info "VRAM limit: 5.5GB | KV cache: q4_0 | Flash attention: enabled"
+            return 0
+        fi
+        print_step "Waiting... (attempt $attempt/$max_attempts)"
+        sleep 5
+        attempt=$((attempt + 1))
+    done
 
-    # Verify it's running
-    if curl -s http://localhost:11434/api/tags > /dev/null; then
-        print_success "Ollama is running with GTX 1060 optimizations"
-    else
-        handle_error "Ollama failed to start"
-    fi
+    # If we get here, Ollama failed to start
+    print_error "Ollama failed to start after $max_attempts attempts"
+    print_info "Checking Ollama service status..."
+    systemctl status ollama --no-pager || true
+    journalctl -u ollama --no-pager -n 20 || true
+    handle_error "Ollama startup failed"
 }
 
 step_8_deepseek_model() {
-    print_header "STEP 8/15: DeepSeek R1-8B Model Download"
+    print_header "STEP 8/16: DeepSeek R1-8B Model Download"
     print_step "Pulling DeepSeek R1-8B model (this may take 10-15 minutes)..."
 
     ollama pull deepseek-r1:8b || handle_error "Model download failed"
@@ -530,7 +614,7 @@ step_8_deepseek_model() {
 }
 
 step_9_fabric_install() {
-    print_header "STEP 9/15: Fabric CLI Installation"
+    print_header "STEP 9/16: Fabric CLI Installation"
 
     # Install Go if needed
     if ! command -v go &> /dev/null; then
@@ -560,7 +644,7 @@ step_9_fabric_install() {
 }
 
 step_10_databases() {
-    print_header "STEP 10/15: Database Deployment"
+    print_header "STEP 10/16: Database Deployment"
 
     print_step "Starting PostgreSQL with pgvector..."
     docker run -d \
@@ -587,49 +671,146 @@ step_10_databases() {
 }
 
 step_11_litellm() {
-    print_header "STEP 11/15: LiteLLM Gateway Configuration"
+    print_header "STEP 11/16: LiteLLM Gateway Configuration"
 
     mkdir -p /etc/litellm
 
+    # Create comprehensive LiteLLM config with Ollama primary + Claude fallback
     cat > /etc/litellm/config.yaml << 'EOF'
+# LiteLLM Configuration for AI Empire
+# Primary: Local Ollama (free) | Fallback: Claude API (paid)
+
 model_list:
+  # ═══════════════════════════════════════════════════════════════
+  # PRIMARY: Local DeepSeek R1-8B via Ollama (FREE)
+  # ═══════════════════════════════════════════════════════════════
+  - model_name: deepseek-local
+    litellm_params:
+      model: ollama/deepseek-r1:8b
+      api_base: http://localhost:11434
+      timeout: 300
+      stream: true
+    model_info:
+      description: "Local DeepSeek R1-8B - FREE inference"
+      max_tokens: 8192
+
+  # Alias for compatibility
   - model_name: deepseek-r1-8b
     litellm_params:
       model: ollama/deepseek-r1:8b
       api_base: http://localhost:11434
+      timeout: 300
+
+  # ═══════════════════════════════════════════════════════════════
+  # FALLBACK: Claude API (PAID - use sparingly)
+  # ═══════════════════════════════════════════════════════════════
+  - model_name: claude-fallback
+    litellm_params:
+      model: claude-3-5-sonnet-20241022
+      api_key: os.environ/ANTHROPIC_API_KEY
+      timeout: 120
+    model_info:
+      description: "Claude 3.5 Sonnet - Fallback for complex tasks"
 
   - model_name: claude-3-5-sonnet
     litellm_params:
       model: claude-3-5-sonnet-20241022
-      api_key: ${ANTHROPIC_API_KEY}
+      api_key: os.environ/ANTHROPIC_API_KEY
 
+  # ═══════════════════════════════════════════════════════════════
+  # SMART ROUTING: Auto-fallback from local to cloud
+  # ═══════════════════════════════════════════════════════════════
+  - model_name: smart
+    litellm_params:
+      model: ollama/deepseek-r1:8b
+      api_base: http://localhost:11434
+      timeout: 300
+      fallbacks:
+        - model: claude-3-5-sonnet-20241022
+          api_key: os.environ/ANTHROPIC_API_KEY
+
+# Router settings for intelligent failover
 router_settings:
+  routing_strategy: least-busy
   enable_pre_call_checks: true
-  allowed_fails: 3
-  num_retries: 2
+  allowed_fails: 2
+  num_retries: 3
+  retry_after: 5
+  timeout: 300
+  fallbacks:
+    - deepseek-local: [claude-fallback]
+    - deepseek-r1-8b: [claude-fallback]
 
+# LiteLLM general settings
 litellm_settings:
-  success_callback: []
-  failure_callback: []
+  drop_params: true
+  set_verbose: false
+
+  # Redis caching for response deduplication
   cache: true
   cache_params:
     type: redis
     host: localhost
     port: 6379
+    ttl: 3600
+
+  # Callbacks (uncomment for monitoring)
+  # success_callback: ["langfuse"]
+  # failure_callback: ["langfuse"]
+
+# General settings
+general_settings:
+  master_key: os.environ/LITELLM_MASTER_KEY
+  database_url: os.environ/DATABASE_URL
+
+# Environment variable defaults
+environment_variables:
+  ANTHROPIC_API_KEY: ""
+  LITELLM_MASTER_KEY: "sk-litellm-master-key-change-me"
+  DATABASE_URL: "postgresql://postgres:changeme@localhost:5432/ai_empire"
 EOF
 
+    # Create LiteLLM environment file
+    cat > /etc/litellm/env << 'EOF'
+# LiteLLM Environment Variables
+# Edit these values before starting the service
+
+# Anthropic API Key (required for Claude fallback)
+ANTHROPIC_API_KEY=your_anthropic_api_key_here
+
+# LiteLLM Master Key (for API authentication)
+LITELLM_MASTER_KEY=sk-litellm-master-key-change-me
+
+# PostgreSQL connection (for logging/analytics)
+DATABASE_URL=postgresql://postgres:changeme@localhost:5432/ai_empire
+
+# Redis connection
+REDIS_HOST=localhost
+REDIS_PORT=6379
+EOF
+
+    chmod 600 /etc/litellm/env
+
+    # Create systemd service with environment file
     cat > /etc/systemd/system/litellm.service << 'EOF'
 [Unit]
-Description=LiteLLM Proxy Gateway
-After=network.target ollama.service
+Description=LiteLLM Proxy Gateway - Unified AI API
+After=network.target ollama.service redis.service postgresql.service
+Wants=ollama.service
 
 [Service]
 Type=simple
 User=root
 WorkingDirectory=/etc/litellm
-ExecStart=/usr/local/bin/litellm --config /etc/litellm/config.yaml --port 4000
+EnvironmentFile=/etc/litellm/env
+ExecStart=/usr/local/bin/litellm --config /etc/litellm/config.yaml --host 0.0.0.0 --port 4000
 Restart=always
 RestartSec=10
+TimeoutStartSec=60
+
+# Resource limits
+MemoryMax=512M
+CPUQuota=50%
 
 [Install]
 WantedBy=multi-user.target
@@ -637,14 +818,27 @@ EOF
 
     systemctl daemon-reload
     systemctl enable litellm
-    systemctl start litellm
+
+    # Start LiteLLM with retry
+    print_step "Starting LiteLLM gateway..."
+    systemctl start litellm || {
+        print_warning "LiteLLM failed to start (may need ANTHROPIC_API_KEY)"
+        print_info "Edit /etc/litellm/env and restart: systemctl restart litellm"
+    }
 
     sleep 3
-    print_success "LiteLLM gateway deployed"
+
+    # Verify LiteLLM is running
+    if curl -s http://localhost:4000/health > /dev/null 2>&1; then
+        print_success "LiteLLM gateway deployed and healthy"
+    else
+        print_warning "LiteLLM deployed but not responding yet"
+        print_info "Check: journalctl -u litellm -f"
+    fi
 }
 
 step_12_n8n() {
-    print_header "STEP 12/15: n8n Automation Platform"
+    print_header "STEP 12/16: n8n Automation Platform"
 
     print_step "Deploying n8n..."
     docker run -d \
@@ -663,7 +857,7 @@ step_12_n8n() {
 }
 
 step_13_tailscale() {
-    print_header "STEP 13/15: Tailscale VPN"
+    print_header "STEP 13/16: Tailscale VPN"
 
     print_step "Installing Tailscale..."
     curl -fsSL https://tailscale.com/install.sh | sh || handle_error "Tailscale installation failed"
@@ -673,7 +867,7 @@ step_13_tailscale() {
 }
 
 step_14_ai_empire_services() {
-    print_header "STEP 14/15: AI Empire Python Services"
+    print_header "STEP 14/16: AI Empire Python Services"
 
     INSTALL_DIR="/opt/ai-empire"
     mkdir -p "$INSTALL_DIR"
@@ -753,7 +947,7 @@ EOF
 }
 
 step_15_environment_setup() {
-    print_header "STEP 15/15: Environment Configuration"
+    print_header "STEP 15/16: Environment Configuration"
 
     print_step "Creating environment templates..."
 
@@ -791,6 +985,173 @@ EOF
     chmod +x /usr/local/bin/ai-empire
 
     print_success "Environment templates created"
+}
+
+step_16_health_checks() {
+    print_header "STEP 16/16: Comprehensive Health Verification"
+
+    local all_healthy=true
+    local failed_services=""
+
+    echo ""
+    echo "╔══════════════════════════════════════════════════════════════╗"
+    echo "║                   SERVICE HEALTH CHECK                       ║"
+    echo "╚══════════════════════════════════════════════════════════════╝"
+    echo ""
+
+    # 1. Check NVIDIA Driver
+    print_step "Checking NVIDIA Driver..."
+    if command -v nvidia-smi &> /dev/null; then
+        local gpu_info=$(nvidia-smi --query-gpu=name,driver_version,memory.total,memory.free --format=csv,noheader 2>/dev/null)
+        if [ -n "$gpu_info" ]; then
+            print_success "NVIDIA Driver: $gpu_info"
+        else
+            print_warning "NVIDIA Driver installed but GPU not responding"
+            all_healthy=false
+            failed_services="$failed_services nvidia-driver"
+        fi
+    else
+        print_warning "NVIDIA Driver not installed"
+        all_healthy=false
+        failed_services="$failed_services nvidia-driver"
+    fi
+
+    # 2. Check Ollama
+    print_step "Checking Ollama..."
+    if systemctl is-active --quiet ollama; then
+        if curl -s http://localhost:11434/api/tags > /dev/null 2>&1; then
+            local models=$(curl -s http://localhost:11434/api/tags | jq -r '.models[].name' 2>/dev/null | tr '\n' ', ' | sed 's/,$//')
+            print_success "Ollama: Running | Models: ${models:-none}"
+        else
+            print_warning "Ollama: Service running but API not responding"
+            all_healthy=false
+            failed_services="$failed_services ollama-api"
+        fi
+    else
+        print_error "Ollama: NOT RUNNING"
+        all_healthy=false
+        failed_services="$failed_services ollama"
+    fi
+
+    # 3. Check LiteLLM
+    print_step "Checking LiteLLM..."
+    if systemctl is-active --quiet litellm; then
+        if curl -s http://localhost:4000/health > /dev/null 2>&1; then
+            print_success "LiteLLM: Healthy on port 4000"
+        else
+            print_warning "LiteLLM: Service running but health check failed"
+            all_healthy=false
+            failed_services="$failed_services litellm-api"
+        fi
+    else
+        print_warning "LiteLLM: NOT RUNNING (may need ANTHROPIC_API_KEY)"
+        # Not marking as failed - it's expected without API key
+    fi
+
+    # 4. Check PostgreSQL (Docker)
+    print_step "Checking PostgreSQL..."
+    if docker ps --format '{{.Names}}' | grep -q ai-empire-postgres; then
+        if docker exec ai-empire-postgres pg_isready -U postgres > /dev/null 2>&1; then
+            print_success "PostgreSQL: Running on port 5432"
+        else
+            print_warning "PostgreSQL: Container running but not ready"
+            all_healthy=false
+            failed_services="$failed_services postgres"
+        fi
+    else
+        print_error "PostgreSQL: Container NOT RUNNING"
+        all_healthy=false
+        failed_services="$failed_services postgres"
+    fi
+
+    # 5. Check Redis (Docker)
+    print_step "Checking Redis..."
+    if docker ps --format '{{.Names}}' | grep -q ai-empire-redis; then
+        if docker exec ai-empire-redis redis-cli ping > /dev/null 2>&1; then
+            print_success "Redis: Running on port 6379"
+        else
+            print_warning "Redis: Container running but not responding"
+            all_healthy=false
+            failed_services="$failed_services redis"
+        fi
+    else
+        print_error "Redis: Container NOT RUNNING"
+        all_healthy=false
+        failed_services="$failed_services redis"
+    fi
+
+    # 6. Check n8n (Docker)
+    print_step "Checking n8n..."
+    if docker ps --format '{{.Names}}' | grep -q ai-empire-n8n; then
+        if curl -s http://localhost:5678 > /dev/null 2>&1; then
+            print_success "n8n: Running on port 5678"
+        else
+            print_warning "n8n: Container running but web UI not ready"
+            # Not critical, may just be starting
+        fi
+    else
+        print_error "n8n: Container NOT RUNNING"
+        all_healthy=false
+        failed_services="$failed_services n8n"
+    fi
+
+    # 7. Check Fabric Bridge
+    print_step "Checking Fabric Bridge..."
+    if systemctl is-active --quiet fabric-bridge; then
+        if curl -s http://localhost:8080/health > /dev/null 2>&1; then
+            print_success "Fabric Bridge: Running on port 8080"
+        else
+            print_warning "Fabric Bridge: Service running but not responding"
+        fi
+    else
+        print_warning "Fabric Bridge: NOT RUNNING"
+    fi
+
+    # 8. Check VRAM Monitor
+    print_step "Checking VRAM Monitor..."
+    if systemctl is-active --quiet vram-monitor; then
+        print_success "VRAM Monitor: Running"
+    else
+        print_warning "VRAM Monitor: NOT RUNNING (needs nvidia-smi)"
+    fi
+
+    # 9. Check Tailscale
+    print_step "Checking Tailscale..."
+    if command -v tailscale &> /dev/null; then
+        local ts_status=$(tailscale status 2>&1 | head -1)
+        if echo "$ts_status" | grep -q "Tailscale is stopped"; then
+            print_warning "Tailscale: Installed but not authenticated"
+            print_info "Run: sudo tailscale up"
+        elif echo "$ts_status" | grep -q "logged out"; then
+            print_warning "Tailscale: Installed but logged out"
+        else
+            print_success "Tailscale: $ts_status"
+        fi
+    else
+        print_warning "Tailscale: NOT INSTALLED"
+    fi
+
+    # Summary
+    echo ""
+    echo "╔══════════════════════════════════════════════════════════════╗"
+    echo "║                     HEALTH CHECK SUMMARY                     ║"
+    echo "╚══════════════════════════════════════════════════════════════╝"
+    echo ""
+
+    if [ "$all_healthy" = true ]; then
+        print_success "All critical services are healthy!"
+    else
+        print_warning "Some services need attention: $failed_services"
+        echo ""
+        print_info "Troubleshooting commands:"
+        echo "  journalctl -u ollama -f        # Ollama logs"
+        echo "  journalctl -u litellm -f       # LiteLLM logs"
+        echo "  docker logs ai-empire-postgres # PostgreSQL logs"
+        echo "  docker logs ai-empire-redis    # Redis logs"
+        echo "  docker logs ai-empire-n8n      # n8n logs"
+    fi
+
+    echo ""
 }
 
 ################################################################################
@@ -916,22 +1277,24 @@ main() {
     # Run pre-flight checks
     preflight_system_check
 
-    # Main deployment steps
-    step_1_nuclear_cleanup
-    step_2_system_update
-    step_3_python_packages
-    step_4_docker_setup
-    step_5_nvidia_docker
-    step_6_ollama_install
-    step_7_ollama_optimize
-    step_8_deepseek_model
-    step_9_fabric_install
-    step_10_databases
-    step_11_litellm
-    step_12_n8n
-    step_13_tailscale
-    step_14_ai_empire_services
-    step_15_environment_setup
+    # Main deployment steps (16 total)
+    step_1_nuclear_cleanup          # Clean existing Ollama installations
+    step_2_system_update            # System packages and dependencies
+    step_3_python_packages          # Python libraries
+    step_4_docker_setup             # Docker configuration
+    step_4b_nvidia_driver           # NVIDIA Driver 570 installation
+    step_5_nvidia_docker            # NVIDIA Container Toolkit
+    step_6_ollama_install           # Fresh Ollama installation
+    step_7_ollama_optimize          # GTX 1060 6GB optimizations
+    step_8_deepseek_model           # DeepSeek R1-8B model
+    step_9_fabric_install           # Fabric CLI
+    step_10_databases               # PostgreSQL + Redis
+    step_11_litellm                 # LiteLLM gateway
+    step_12_n8n                     # n8n automation
+    step_13_tailscale               # Tailscale VPN
+    step_14_ai_empire_services      # Python services
+    step_15_environment_setup       # Environment files
+    step_16_health_checks           # Comprehensive verification
 
     print_deployment_summary
 
