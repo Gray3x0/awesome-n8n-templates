@@ -1,264 +1,47 @@
 version: '3.8'
 
 ################################################################################
-# Ollama Enhancement Suite - Docker Compose Mega Stack
-# Optimized for GTX 1060 6GB / Ubuntu 24.04 LTS
+# Ollama Suite - Simplified Stack for Knowledge Base
+# Optimized for: Claude Pro + DeepSeek-R1 + Local Knowledge Base
+# GTX 1060 6GB / Ubuntu 24.04 LTS
+#
+# NOTE: Your n8n, PostgreSQL, and Redis are already running elsewhere.
+# This compose file only includes Qdrant for vector search.
 ################################################################################
 
 services:
   # ============================================================================
-  # UI Frontends
-  # ============================================================================
-
-  open-webui:
-    image: ghcr.io/open-webui/open-webui:main
-    container_name: open-webui
-    ports:
-      - "3000:8080"
-    volumes:
-      - open-webui-data:/app/backend/data
-    environment:
-      - OLLAMA_BASE_URL=http://host.docker.internal:11434
-      - WEBUI_AUTH=false
-      - ENABLE_RAG_WEB_SEARCH=true
-      - ENABLE_COMMUNITY_SHARING=false
-    extra_hosts:
-      - "host.docker.internal:host-gateway"
-    restart: always
-    deploy:
-      resources:
-        reservations:
-          devices:
-            - driver: nvidia
-              count: all
-              capabilities: [gpu]
-
-  librechat:
-    image: ghcr.io/danny-avila/librechat:latest
-    container_name: librechat
-    ports:
-      - "3001:3001"
-    volumes:
-      - librechat-data:/app/client/public/images
-    environment:
-      - OLLAMA_BASE_URL=http://host.docker.internal:11434
-      - ENDPOINTS=ollama
-      - PORT=3001
-      - ALLOW_REGISTRATION=true
-    extra_hosts:
-      - "host.docker.internal:host-gateway"
-    restart: always
-    depends_on:
-      - librechat-db
-
-  librechat-db:
-    image: mongo:latest
-    container_name: librechat-db
-    volumes:
-      - librechat-mongo-data:/data/db
-    restart: always
-
-  anythingllm:
-    image: mintplexlabs/anythingllm
-    container_name: anythingllm
-    ports:
-      - "3002:3001"
-    volumes:
-      - anythingllm-data:/app/server/storage
-    environment:
-      - OLLAMA_BASE_PATH=http://host.docker.internal:11434
-      - STORAGE_DIR=/app/server/storage
-    extra_hosts:
-      - "host.docker.internal:host-gateway"
-    restart: always
-
-  # ============================================================================
-  # Vector Databases
+  # Vector Database (Core component for knowledge base)
   # ============================================================================
 
   qdrant:
     image: qdrant/qdrant:latest
     container_name: qdrant
     ports:
-      - "6333:6333"
-      - "6334:6334"
+      - "6333:6333"  # HTTP API
+      - "6334:6334"  # gRPC API
     volumes:
       - qdrant-data:/qdrant/storage
-    restart: always
-
-  # ============================================================================
-  # Monitoring & Observability
-  # ============================================================================
-
-  langfuse-server:
-    image: langfuse/langfuse:latest
-    container_name: langfuse
-    ports:
-      - "3003:3000"
     environment:
-      - DATABASE_URL=postgresql://langfuse:langfuse@langfuse-db:5432/langfuse
-      - NEXTAUTH_SECRET=change-this-secret-key-immediately
-      - NEXTAUTH_URL=http://localhost:3003
-      - SALT=change-this-salt-immediately
-      - TELEMETRY_ENABLED=false
-      - LANGFUSE_ENABLE_EXPERIMENTAL_FEATURES=true
-    depends_on:
-      - langfuse-db
+      - QDRANT__SERVICE__HTTP_PORT=6333
+      - QDRANT__SERVICE__GRPC_PORT=6334
     restart: always
-
-  langfuse-db:
-    image: postgres:15-alpine
-    container_name: langfuse-db
-    environment:
-      - POSTGRES_USER=langfuse
-      - POSTGRES_PASSWORD=langfuse
-      - POSTGRES_DB=langfuse
-    volumes:
-      - langfuse-db-data:/var/lib/postgresql/data
-    restart: always
-
-  prometheus:
-    image: prom/prometheus:latest
-    container_name: prometheus
-    ports:
-      - "9090:9090"
-    volumes:
-      - ./configs/prometheus.yml:/etc/prometheus/prometheus.yml
-      - prometheus-data:/prometheus
-    command:
-      - '--config.file=/etc/prometheus/prometheus.yml'
-      - '--storage.tsdb.path=/prometheus'
-      - '--web.enable-lifecycle'
-    extra_hosts:
-      - "host.docker.internal:host-gateway"
-    restart: always
-
-  grafana:
-    image: grafana/grafana:latest
-    container_name: grafana
-    ports:
-      - "3004:3000"
-    volumes:
-      - grafana-data:/var/lib/grafana
-      - ./configs/grafana:/etc/grafana/provisioning
-    environment:
-      - GF_SECURITY_ADMIN_PASSWORD=admin
-      - GF_USERS_ALLOW_SIGN_UP=false
-      - GF_SERVER_ROOT_URL=http://localhost:3004
-      - GF_INSTALL_PLUGINS=grafana-llm-app
-    restart: always
-
-  node-exporter:
-    image: prom/node-exporter:latest
-    container_name: node-exporter
-    ports:
-      - "9100:9100"
-    command:
-      - '--path.procfs=/host/proc'
-      - '--path.sysfs=/host/sys'
-      - '--collector.filesystem.mount-points-exclude=^/(sys|proc|dev|host|etc)($$|/)'
-    volumes:
-      - /proc:/host/proc:ro
-      - /sys:/host/sys:ro
-      - /:/rootfs:ro
-    restart: always
-
-  nvidia-exporter:
-    image: utkuozdemir/nvidia_gpu_exporter:latest
-    container_name: nvidia-exporter
-    ports:
-      - "9835:9835"
-    volumes:
-      - /usr/lib/x86_64-linux-gnu/libnvidia-ml.so:/usr/lib/x86_64-linux-gnu/libnvidia-ml.so:ro
-      - /usr/lib/x86_64-linux-gnu/libnvidia-ml.so.1:/usr/lib/x86_64-linux-gnu/libnvidia-ml.so.1:ro
-      - /usr/bin/nvidia-smi:/usr/bin/nvidia-smi:ro
-    devices:
-      - /dev/nvidiactl:/dev/nvidiactl
-      - /dev/nvidia0:/dev/nvidia0
-    restart: always
-
-  # ============================================================================
-  # Integration Tools
-  # ============================================================================
-
-  n8n:
-    image: n8nio/n8n:latest
-    container_name: n8n
-    ports:
-      - "5678:5678"
-    volumes:
-      - n8n-data:/home/node/.n8n
-    environment:
-      - N8N_HOST=localhost
-      - N8N_PORT=5678
-      - N8N_PROTOCOL=http
-      - WEBHOOK_URL=http://localhost:5678/
-      - GENERIC_TIMEZONE=UTC
-    extra_hosts:
-      - "host.docker.internal:host-gateway"
-    restart: always
-
-  flowise:
-    image: flowiseai/flowise:latest
-    container_name: flowise
-    ports:
-      - "3005:3000"
-    volumes:
-      - flowise-data:/root/.flowise
-    environment:
-      - FLOWISE_USERNAME=admin
-      - FLOWISE_PASSWORD=admin
-      - OLLAMA_BASE_URL=http://host.docker.internal:11434
-      - DATABASE_PATH=/root/.flowise
-      - APIKEY_PATH=/root/.flowise
-      - SECRETKEY_PATH=/root/.flowise
-      - LOG_PATH=/root/.flowise/logs
-    extra_hosts:
-      - "host.docker.internal:host-gateway"
-    restart: always
-
-  # ============================================================================
-  # Reverse Proxy (Optional - uncomment if needed)
-  # ============================================================================
-
-  # nginx:
-  #   image: nginx:alpine
-  #   container_name: nginx-proxy
-  #   ports:
-  #     - "80:80"
-  #     - "443:443"
-  #   volumes:
-  #     - ./configs/nginx/nginx.conf:/etc/nginx/nginx.conf:ro
-  #     - ./configs/nginx/ssl:/etc/nginx/ssl:ro
-  #   extra_hosts:
-  #     - "host.docker.internal:host-gateway"
-  #   restart: always
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:6333/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
 
 # ============================================================================
 # Volumes
 # ============================================================================
 
 volumes:
-  open-webui-data:
-    driver: local
-  librechat-data:
-    driver: local
-  librechat-mongo-data:
-    driver: local
-  anythingllm-data:
-    driver: local
   qdrant-data:
     driver: local
-  langfuse-db-data:
-    driver: local
-  prometheus-data:
-    driver: local
-  grafana-data:
-    driver: local
-  n8n-data:
-    driver: local
-  flowise-data:
-    driver: local
+    # Your vectors and embeddings will be stored here
+    # Estimated size: ~1GB for 1M vectors (768-dim embeddings)
 
 # ============================================================================
 # Networks
@@ -267,3 +50,39 @@ volumes:
 networks:
   default:
     name: ollama-network
+    driver: bridge
+
+# ============================================================================
+# Usage Instructions
+# ============================================================================
+#
+# Start Qdrant:
+#   docker compose up -d qdrant
+#
+# Stop Qdrant:
+#   docker compose down
+#
+# View logs:
+#   docker logs qdrant
+#
+# Access Qdrant API:
+#   http://localhost:6333
+#   http://localhost:6333/dashboard  (Web UI)
+#
+# Create collection (example):
+#   curl -X PUT http://localhost:6333/collections/knowledge \
+#     -H "Content-Type: application/json" \
+#     -d '{
+#       "vectors": {
+#         "size": 768,
+#         "distance": "Cosine"
+#       }
+#     }'
+#
+# Integration with n8n:
+#   Use HTTP Request node to:
+#   1. Generate embeddings with DeepSeek/Ollama
+#   2. Store vectors in Qdrant
+#   3. Search for similar documents
+#
+# ============================================================================
