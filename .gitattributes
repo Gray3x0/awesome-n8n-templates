@@ -1,0 +1,11 @@
+# Ensure all shell scripts and Python files always use LF (Unix) line endings
+# This prevents CRLF issues on checkout
+
+*.sh text eol=lf
+*.py text eol=lf
+*.json text eol=lf
+*.yml text eol=lf
+*.yaml text eol=lf
+*.md text eol=lf
+*.conf text eol=lf
+*.cfg text eol=lf
